@@ -1,0 +1,20 @@
+# ── Runtime artifacts ──────────────────────────────────────────────────────
+output/
+logs/
+
+# ── Session storage (contains portal auth cookies — treat like passwords) ──
+.sessions/
+
+# ── Environment (contains real credentials) ───────────────────────────────
+.env
+
+# ── Node modules ──────────────────────────────────────────────────────────
+node_modules/
+
+# ── OS artifacts ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE artifacts ─────────────────────────────────────────────────────────
+.vscode/
+*.log
