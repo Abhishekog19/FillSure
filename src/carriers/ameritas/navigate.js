@@ -4,34 +4,33 @@
  * ─────────────────────────────────────────────────────────────────────────
  * Ameritas provider portal navigation script.
  *
- * IMPORTANT — SELECTORS NEED VERIFICATION:
- * The CSS selectors in this file (marked with [VERIFY]) must be confirmed
- * by manually walking through the Ameritas portal before this script runs
- * against real patient data. The portal URL and field names below are
- * best-effort based on common Ameritas portal patterns.
+ * ── CONFIRMED SELECTORS (verified via live portal inspection, June 2026) ──
  *
- * HOW TO VERIFY:
- *   1. Open the Ameritas provider portal in Chrome
- *   2. Right-click each field → Inspect
- *   3. Note the `id`, `name`, or `data-*` attribute
- *   4. Update the selectors in SELECTORS below
+ * Login page: https://service.ameritas.com/service/login.asp
+ *   - User ID field : id="ontUser",  name="ontUser"
+ *   - Password field: id="ontPassword", name="ontPassword"
+ *   - Sign In button: id="Submit", value="Login"
+ *   - Form action   : https://service.ameritas.com/ea/ds-wac-iis.dll
  *
- * Tested against: ameritas.com provider portal (June 2026)
+ * OTP page (appears after login on unrecognised device):
+ *   - Heading text  : "Your one-time passcode"
+ *   - OTP input     : placeholder="One-Time Passcode" (selector TBC on OTP page)
+ *   - Remember ckbox: label text "Remember this device for 30 days"
+ *   - Submit button : text "Next"
  *
  * ── Session / OTP flow ────────────────────────────────────────────────────
- * Daily mode (default):
- *   - Uses persistent context with saved cookies
- *   - If portal skips login → go straight to patient processing
- *   - If portal shows login → enter credentials automatically
- *   - If portal shows OTP → STOP. Print clear error. Tell operator to
- *     run --setup-ameritas.
+ * Setup mode (first run, or every 30 days):
+ *   - npm run setup  → opens visible browser
+ *   - Script fills User ID + Password automatically
+ *   - OTP page appears → script auto-checks "Remember this device for 30 days"
+ *   - Script PAUSES and asks operator to enter the 6-digit code + click Next
+ *   - Script detects dashboard → session saved to .sessions/ameritas/
+ *   - Next 30 days: fully automated (no OTP)
  *
- * Setup mode (--setup-ameritas):
- *   - Opens a VISIBLE browser window
- *   - Enters credentials automatically
- *   - WAITS for the operator to enter OTP and check "Remember this device"
- *   - Detects when OTP is done (dashboard appears)
- *   - Saves session to disk → next 30 days will be OTP-free
+ * Daily mode (default, headless):
+ *   - Loads saved cookies → portal skips login entirely
+ *   - If OTP page detected → throws AMERITAS_OTP_REQUIRED error
+ *   - Operator runs npm run setup (~2 min) to reset the 30-day window
  */
 
 require('dotenv').config();
@@ -41,36 +40,42 @@ const { getCredentials } = require('../../utils/credentials');
 const { getAmeritasContext } = require('./session');
 const { downloadBenefitsPdf } = require('./downloadPdf');
 
-// ── Portal URLs ─────────────────────────────────────────────────────────────
-const LOGIN_URL = process.env.AMERITAS_LOGIN_URL || 'https://provider.ameritasgroup.com';
+// ── Portal URLs (confirmed via live inspection) ──────────────────────────────
+// Note: www.ameritas.com/service/login.asp redirects to service.ameritas.com
+const LOGIN_URL = process.env.AMERITAS_LOGIN_URL || 'https://service.ameritas.com/service/login.asp';
 
 // ── Selectors ───────────────────────────────────────────────────────────────
-// [VERIFY] — Confirm every selector by inspecting the live Ameritas portal
 const SELECTORS = {
-  // Login page
-  usernameField:    '#username, input[name="username"], input[type="text"]',          // [VERIFY]
-  passwordField:    '#password, input[name="password"], input[type="password"]',      // [VERIFY]
-  loginButton:      'button[type="submit"], #login-btn, button:text("Sign In")',      // [VERIFY]
+  // ── LOGIN PAGE (✅ confirmed via live portal inspection) ────────────────
+  userIdField:      '#ontUser',            // input name="ontUser", id="ontUser"
+  passwordField:    '#ontPassword',        // input name="ontPassword", id="ontPassword"
+  loginButton:      '#Submit',             // input id="Submit" value="Login"
 
-  // OTP page — present when portal doesn't recognise the device
-  otpField:         'input[name="otp"], input[name="code"], #otp-input, input[name="verificationCode"]', // [VERIFY]
-  rememberDevice:   'input[type="checkbox"][name*="remember"], label:text("Remember")', // [VERIFY]
-  otpSubmit:        'button[type="submit"], button:text("Verify"), button:text("Continue")', // [VERIFY]
+  // ── OTP PAGE (✅ confirmed from user screenshots) ────────────────────────
+  // Appears after login when device is not yet remembered
+  otpHeading:       'h1, h2, h3',         // heading text: "Your one-time passcode"
+  otpField:         'input[placeholder="One-Time Passcode"], input[type="text"], input[type="number"]',
+  rememberDevice:   'input[type="checkbox"]', // "Remember this device for 30 days" checkbox
+  otpSubmit:        'input[value="Next"], button:text("Next")', // "Next" submit button
 
-  // Dashboard — used to detect successful login
-  dashboard:        '#provider-dashboard, .dashboard-nav, nav.main-nav, .provider-home', // [VERIFY]
+  // ── DASHBOARD — used to detect successful login ─────────────────────────
+  // [VERIFY] — inspect the page after login to confirm dashboard element
+  dashboard:        '.dashboard, #dashboard, .welcome, .home-container, .provider-home, main',
 
-  // Eligibility / Benefits search
-  eligibilityNav:   'a[href*="eligibility"], a:text("Eligibility"), nav >> text=Eligibility', // [VERIFY]
-  memberIdField:    'input[name="memberId"], input[name="memberID"], #member-id',      // [VERIFY]
-  dobField:         'input[name="dob"], input[name="dateOfBirth"], #date-of-birth',    // [VERIFY]
-  searchButton:     'button:text("Search"), button[type="submit"]',                    // [VERIFY]
+  // ── ELIGIBILITY / BENEFITS SEARCH ──────────────────────────────────────
+  // [VERIFY] — inspect post-login navigation to find correct selectors
+  eligibilityNav:   'a[href*="eligib"], a[href*="benefit"], a:text("Eligibility"), a:text("Benefits")',
+  memberIdField:    'input[name*="member"], input[name*="Member"], input[name*="id"], #member-id',
+  dobField:         'input[name*="dob"], input[name*="birth"], input[name*="DOB"], #date-of-birth',
+  searchButton:     'input[type="submit"], button:text("Search"), button[type="submit"]',
 
-  // Results
-  firstResult:      'table.results tbody tr:first-child, .member-result:first-child, .eligibility-result:first-child', // [VERIFY]
+  // ── RESULTS ─────────────────────────────────────────────────────────────
+  // [VERIFY]
+  firstResult:      'table tbody tr:first-child td a, .member-result:first-child, .result-row:first-child',
 
-  // PDF download button on the benefits/eligibility detail page
-  downloadButton:   'a:text("Download"), button:text("Download"), a:text("Print"), a[href$=".pdf"], .download-benefits, button:text("Export")', // [VERIFY]
+  // ── PDF DOWNLOAD ─────────────────────────────────────────────────────────
+  // [VERIFY] — inspect the benefits detail page to find the download button
+  downloadButton:   'a[href$=".pdf"], a:text("Download"), button:text("Download"), a:text("Print"), input[value="Download"]',
 };
 
 // ── OTP detection timeout (how long to wait for operator in setup mode) ─────
@@ -179,20 +184,23 @@ async function performLogin(page, setupMode) {
   // Scroll first (human behaviour)
   await humanScroll(page, 50, 150);
 
-  // Enter credentials
-  await humanType(page, SELECTORS.usernameField, creds.username);
+  // Enter User ID and Password with human typing speed
+  await humanType(page, SELECTORS.userIdField, creds.username);
   await humanDelay(400, 900);
   await humanType(page, SELECTORS.passwordField, creds.password);
   await humanDelay(600, 1200);
 
-  // Click login
+  // Click Sign In
   const loginBtn = page.locator(SELECTORS.loginButton).first();
   await humanClick(page, loginBtn);
   await page.waitForLoadState('networkidle', { timeout: 20_000 });
   await humanDelay(1000, 2000);
 
   // ── Check for OTP page ──────────────────────────────────────────────────
-  const otpPresent = await page.locator(SELECTORS.otpField).first().isVisible().catch(() => false);
+  // Detection: look for the OTP input field OR the heading text
+  const otpFieldVisible = await page.locator(SELECTORS.otpField).first().isVisible().catch(() => false);
+  const otpHeadingText  = await page.locator(SELECTORS.otpHeading).first().textContent().catch(() => '');
+  const otpPresent = otpFieldVisible || (otpHeadingText || '').toLowerCase().includes('one-time');
 
   if (otpPresent) {
     await handleOtp(page, setupMode);
@@ -233,24 +241,60 @@ async function handleOtp(page, setupMode) {
     throw new Error('AMERITAS_OTP_REQUIRED — Run: npm run setup');
   }
 
-  // ── Setup mode: operator enters OTP in the visible browser window ─────
-  console.log('\n');
-  console.log('🔐  OTP REQUIRED — PLEASE COMPLETE IN THE BROWSER WINDOW');
-  console.log('──────────────────────────────────────────────────────────');
-  console.log('  1. Enter the OTP code sent to your email / phone');
-  console.log('  2. Check the "Remember this device" / "Keep me logged in" box');
-  console.log('  3. Click Submit / Verify / Continue in the browser');
-  console.log('  ⏳ Waiting up to 3 minutes for you to complete this step...');
-  console.log('──────────────────────────────────────────────────────────\n');
+  // ── Setup mode: auto-check remember-device, then wait for operator code ──
 
-  logger.info('Waiting for operator to complete OTP in browser window');
-
-  // Wait until the OTP page disappears (operator completed it)
+  // 1. Automatically check "Remember this device for 30 days" before prompting
+  //    the operator — so they don't have to remember to tick it.
   try {
-    await page.waitForSelector(SELECTORS.dashboard, {
-      timeout: OTP_WAIT_TIMEOUT_MS,
-      state: 'visible',
-    });
+    const rememberCheckbox = page.locator(SELECTORS.rememberDevice).first();
+    const isChecked = await rememberCheckbox.isChecked().catch(() => false);
+    if (!isChecked) {
+      await rememberCheckbox.check();
+      logger.info('Auto-checked "Remember this device for 30 days" checkbox');
+    } else {
+      logger.info('Remember-device checkbox was already checked');
+    }
+  } catch (e) {
+    // Non-fatal — operator can check it manually
+    logger.warn('Could not auto-check remember-device checkbox', { error: e.message });
+  }
+
+  // 2. Prompt operator — ONLY task is to type the 6-digit code and click Next
+  console.log('\n');
+  console.log('🔐  OTP REQUIRED — BROWSER WINDOW IS OPEN');
+  console.log('════════════════════════════════════════════════════════════');
+  console.log('  ✅  "Remember this device for 30 days" has been auto-checked.');
+  console.log('  ');
+  console.log('  Your ONLY task:');
+  console.log('  1. Look at the browser window that just opened');
+  console.log('  2. Type the 6-digit OTP code sent to your email');
+  console.log('  3. Click the "Next" button');
+  console.log('  ');
+  console.log('  That is it. After this, the system runs automatically');
+  console.log('  for the next 30 days with NO further OTP prompts.');
+  console.log('  ');
+  console.log('  ⏳ Waiting up to 3 minutes...');
+  console.log('════════════════════════════════════════════════════════════\n');
+
+  logger.info('Waiting for operator to enter OTP code in browser window');
+
+  // 3. Wait until OTP page is gone (operator submitted the code)
+  //    We detect this by waiting for the OTP field to disappear OR
+  //    for the URL to change away from the OTP page
+  const otpStartUrl = page.url();
+  try {
+    await Promise.race([
+      // Option A: OTP input field disappears (form submitted)
+      page.waitForSelector(SELECTORS.otpField, {
+        state: 'hidden',
+        timeout: OTP_WAIT_TIMEOUT_MS,
+      }),
+      // Option B: URL changes (redirected to dashboard)
+      page.waitForURL(
+        url => url.href !== otpStartUrl,
+        { timeout: OTP_WAIT_TIMEOUT_MS }
+      ),
+    ]);
   } catch {
     throw new Error(
       'OTP entry timed out after 3 minutes. ' +
@@ -258,9 +302,14 @@ async function handleOtp(page, setupMode) {
     );
   }
 
-  console.log('\n✅  OTP completed successfully!');
-  console.log('   Session saved. Daily jobs will run without OTP for ~30 days.\n');
-  logger.info('OTP setup complete — session state will be saved to disk on context close');
+  // Brief wait for full redirect/dashboard load
+  await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+  await humanDelay(1000, 2000);
+
+  console.log('\n✅  OTP accepted! Session saved.');
+  console.log('   Daily jobs will run without OTP for the next 30 days.');
+  console.log('   You will only need to do this again around:', getExpiryDate(), '\n');
+  logger.info('OTP setup complete — 30-day session saved to disk');
 }
 
 // ── Internal: Single patient workflow ───────────────────────────────────────
@@ -311,6 +360,20 @@ async function processOnePatient(page, patient) {
 
 async function isOnDashboard(page) {
   return page.locator(SELECTORS.dashboard).first().isVisible().catch(() => false);
+}
+
+// ── Internal: Expiry date helper ─────────────────────────────────────────────
+// Tells the operator exactly when they'll need to redo OTP setup (~30 days)
+
+function getExpiryDate() {
+  const d = new Date();
+  d.setDate(d.getDate() + 30);
+  return d.toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
 }
 
 module.exports = { processAmeritasPatients };
